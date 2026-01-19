@@ -15,6 +15,8 @@ from config_utils import load_config
 from log_utils import init_logger
 from trade_utils import save_trade_record
 from gb_stop_loss_take_profit import GBSLTPModel
+# ========== 新增：导入1.py的余额获取函数 ==========
+from usdt_get import get_okx_sandbox_balance  # 注意：1.py需重命名为py1.py（避免数字开头），或按实际文件名调整
 
 # ================= 代理配置 =================
 PROXY_SETTINGS = {
@@ -42,7 +44,7 @@ class OKXAPIClient:
         timestamp = now.isoformat(timespec='milliseconds').replace('+00:00', 'Z')
         return timestamp
 
-    def _sign(self, timestamp, method, request_path, body=""):
+    def _sign(self, timestamp, method, request_path, body="", ensure_ascii=True):
         if isinstance(body, dict):
             body = json.dumps(body, separators=(',', ':')) if body else ""
         message = f"{timestamp}{method}{request_path}{body}"
@@ -98,15 +100,27 @@ class OKXAPIClient:
         except Exception as e:
             return None
 
-    # 新增：获取账户余额（USDT）
+    # ========== 核心修改：替换余额获取逻辑 ==========
     def get_account_balance(self):
-        data = self.request("GET", "/api/v5/account/balance", params={"ccy": "USDT"})
-        if not data:
+        try:
+            # 调用1.py的函数获取模拟盘余额
+            balance_data = get_okx_sandbox_balance()
+            if not balance_data:
+                print("❌ 从1.py获取余额失败")
+                return 0.0
+
+            # 提取USDT余额（和1.py的解析逻辑保持一致）
+            total_usdt = balance_data.get('total', {}).get('USDT', 0)
+            avail_usdt = balance_data.get('free', {}).get('USDT', 0)  # 可用余额（可选：也可改用总计）
+
+            # 打印调试信息
+            print(f"✅ 从1.py获取余额 | 总计USDT: {total_usdt} | 可用USDT: {avail_usdt}")
+            # 策略中建议使用可用余额计算仓位
+            return float(avail_usdt) if float(avail_usdt) > 0 else 0.0
+
+        except Exception as e:
+            print(f"❌ 解析1.py余额数据错误: {str(e)}")
             return 0.0
-        for item in data[0]['balData']:
-            if item['ccy'] == 'USDT':
-                return float(item['availBal'])
-        return 0.0
 
     # 新增：获取合约最新价格
     def get_ticker_price(self, symbol):
@@ -130,6 +144,9 @@ class OKXSimFuturesTrader:
         self.tp_prob_threshold = config["strategy"]["tp_prob_threshold"]
         self.sl_prob_threshold = config["strategy"]["sl_prob_threshold"]
         self.cycle_interval = config["strategy"]["cycle_interval"]
+        # 新增：最小盈亏阈值（避免微小波动触发）
+        self.min_profit_threshold = 0.001  # 0.1%最小盈利才触发止盈
+        self.min_loss_threshold = 0.001  # 0.1%最小亏损才触发止损
 
         # 持仓状态
         self.position = 0
@@ -171,6 +188,8 @@ class OKXSimFuturesTrader:
         self.logger.info(f"✅ 仓位配置: 账户权益的{self.position_ratio * 100}%")
         self.logger.info(
             f"✅ 止盈止损阈值: 止盈概率≥{self.tp_prob_threshold * 100}% | 止损概率≥{self.sl_prob_threshold * 100}%")
+        self.logger.info(
+            f"✅ 最小盈亏阈值: 盈利≥{self.min_profit_threshold * 100}% | 亏损≥{self.min_loss_threshold * 100}%")
         self.logger.warning("⚠️  按下Ctrl+C将自动平仓并退出程序")
 
     # ================= 辅助函数：计算下单张数 =================
@@ -188,12 +207,16 @@ class OKXSimFuturesTrader:
             return 0.0
         # 计算下单张数
         order_size = (balance * self.position_ratio * self.leverage) / self.last_price
-        order_size = round(order_size, 6)  # OKX最小精度6位小数
+        # 修正：按OKX BTC合约规则，保留3位小数（最小0.001张）
+        order_size = round(order_size, 2)
+        # 确保最小下单量
+        if order_size < 0.001:
+            self.logger.warning(f"⚠️  计算的下单量{order_size}小于最小0.001张，强制设为0.001")
+            order_size = 0.001
         self.logger.info(
             f"📊 仓位计算 | 账户余额: {balance} USDT | 最新价: {self.last_price} USDT | 下单张数: {order_size}")
         return order_size
 
-    # ================= 行情获取 =================
     def fetch_ohlcv(self, tf='1h', limit=300):
         try:
             okx_tf = self.timeframe_mapping.get(tf, '1H')
@@ -204,7 +227,7 @@ class OKXSimFuturesTrader:
                 return pd.DataFrame()
 
             df = pd.DataFrame(data, columns=[
-                'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote','confirm'
+                'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
             ])
             # 数据格式转换
             for col in ['open', 'high', 'low', 'close', 'vol']:
@@ -219,7 +242,6 @@ class OKXSimFuturesTrader:
             self.logger.error(f"❌ K线获取失败: {str(e)[:100]}")
             return pd.DataFrame()
 
-    # ================= 模型训练 =================
     def train(self, df):
         if df.empty:
             self.logger.error("❌ 训练数据为空")
@@ -241,13 +263,12 @@ class OKXSimFuturesTrader:
         # 训练模型
         self.lr.fit(X, y)
         self.rf.fit(X, y)
-        # 训练止盈止损模型
-        self.sltp_model.train(df, tp_threshold=0.01, sl_threshold=0.01)
+        # 训练止盈止损模型（核心修改：降低阈值到0.2%，提升概率敏感度）
+        self.sltp_model.train(df, tp_threshold=0.002, sl_threshold=0.002)
 
         self.trained = True
         self.logger.info(f"✅ 交易信号模型训练完成 | 样本数:{len(df)} | 上涨概率:{y.mean():.2%}")
 
-    # ================= 加权投票生成信号 =================
     def signal(self, df):
         if not self.trained or df.empty or len(df) < 20:
             return 0
@@ -271,22 +292,86 @@ class OKXSimFuturesTrader:
             self.logger.error(f"❌ 信号计算失败: {str(e)[:100]}")
             return 0
 
-    # ================= 止盈止损判断 =================
+    # ========== 新增：开仓前止盈止损概率检查 ==========
+    def check_pre_open_sltp(self, df):
+        """
+        开仓前检查止盈止损概率是否低于阈值
+        :param df: K线数据
+        :return: bool: True=允许开仓，False=禁止开仓
+        """
+        if not self.trained or df.empty:
+            self.logger.warning("⚠️  模型未训练或K线数据为空，跳过开仓前SLTP检查")
+            return True  # 兜底：无数据时允许开仓
+
+        # 模拟开仓价为当前最新价（开仓前无真实开仓价）
+        pre_entry_price = self.last_price if self.last_price else df['close'].iloc[-1]
+        tp_prob, sl_prob = self.sltp_model.predict(df, entry_price=pre_entry_price, debug=True)
+
+        self.logger.info(
+            f"📊 开仓前SLTP检查 | 止盈概率:{tp_prob:.2%} | 止损概率:{sl_prob:.2%} | 阈值:{self.tp_prob_threshold * 100}%/{self.sl_prob_threshold * 100}%")
+
+        # 核心条件：止盈概率 < 止盈阈值 且 止损概率 < 止损阈值
+        if tp_prob < self.tp_prob_threshold and sl_prob < self.sl_prob_threshold:
+            self.logger.info("✅ 开仓前SLTP检查通过：概率低于阈值")
+            return True
+        else:
+            self.logger.warning(f"❌ 开仓前SLTP检查失败：概率达到或超过阈值，禁止开仓")
+            return False
+
+    # ========== 核心修复：止盈止损结合实际盈亏状态 ==========
     def check_stop_loss_take_profit(self, df):
+        """
+        止盈止损检查：结合实际盈亏状态 + 概率阈值
+        - 止盈：盈利 ≥ 最小盈利阈值 且 止盈概率 ≥ 阈值
+        - 止损：亏损 ≥ 最小亏损阈值 且 止损概率 ≥ 阈值
+        """
         if self.position != 1:
             return
-        tp_prob, sl_prob = self.sltp_model.predict(df)
-        self.logger.info(f"📊 止盈止损预测 | 止盈概率:{tp_prob:.2%} | 止损概率:{sl_prob:.2%}")
-        # 触发止盈
-        if tp_prob >= self.tp_prob_threshold:
-            self.logger.info(f"🚀 触发止盈 | 概率达到{tp_prob:.2%} ≥ {self.tp_prob_threshold * 100}%")
-            self.sell(is_force=True)
-        # 触发止损
-        elif sl_prob >= self.sl_prob_threshold:
-            self.logger.info(f"🛑 触发止损 | 概率达到{sl_prob:.2%} ≥ {self.sl_prob_threshold * 100}%")
+        if self.entry_price is None or self.last_price is None:
+            self.logger.warning("⚠️  无开仓价/最新价，止盈止损预测跳过")
+            return
+
+        # 1. 计算实际盈亏比例
+        profit_ratio = (self.last_price - self.entry_price) / self.entry_price
+        profit_abs = self.last_price - self.entry_price  # 绝对盈亏
+        profit_status = "盈利" if profit_ratio > 0 else "亏损" if profit_ratio < 0 else "持平"
+
+        # 2. 预测止盈止损概率
+        tp_prob, sl_prob = self.sltp_model.predict(df, entry_price=self.entry_price, debug=True)
+        self.logger.info(
+            f"📊 止盈止损预测 | 当前{profit_status} {profit_ratio:.2%} (¥{profit_abs:.2f}) | "
+            f"止盈概率:{tp_prob:.2%} | 止损概率:{sl_prob:.2%}"
+        )
+
+        # 3. 止盈触发：仅当盈利且达到最小盈利阈值 + 止盈概率达标
+        if profit_ratio >= self.min_profit_threshold and tp_prob >= self.tp_prob_threshold:
+            self.logger.info(
+                f"🚀 触发止盈 | 盈利{profit_ratio:.2%} ≥ {self.min_profit_threshold * 100}% + "
+                f"止盈概率{tp_prob:.2%} ≥ {self.tp_prob_threshold * 100}%"
+            )
             self.sell(is_force=True)
 
-    # ================= 布林带风控 =================
+        # 4. 止损触发：仅当亏损且达到最小亏损阈值 + 止损概率达标
+        elif profit_ratio <= -self.min_loss_threshold and sl_prob >= self.sl_prob_threshold:
+            self.logger.info(
+                f"🛑 触发止损 | 亏损{abs(profit_ratio):.2%} ≥ {self.min_loss_threshold * 100}% + "
+                f"止损概率{sl_prob:.2%} ≥ {self.sl_prob_threshold * 100}%"
+            )
+            self.sell(is_force=True)
+
+        # 5. 无触发情况
+        else:
+            reasons = []
+            if profit_ratio < self.min_profit_threshold and tp_prob >= self.tp_prob_threshold:
+                reasons.append(f"盈利不足({profit_ratio:.2%} < {self.min_profit_threshold * 100}%)")
+            if profit_ratio > -self.min_loss_threshold and sl_prob >= self.sl_prob_threshold:
+                reasons.append(f"亏损不足({abs(profit_ratio):.2%} < {self.min_loss_threshold * 100}%)")
+            if tp_prob < self.tp_prob_threshold and sl_prob < self.sl_prob_threshold:
+                reasons.append("概率未达标")
+
+            if reasons:
+                self.logger.info(f"ℹ️  未触发止盈止损 | 原因: {'; '.join(reasons)}")
+
     def boll_filter(self):
         try:
             df = self.fetch_ohlcv('1d', 50)
@@ -303,14 +388,13 @@ class OKXSimFuturesTrader:
             self.logger.error(f"❌ 风控计算失败: {str(e)[:100]}")
             self.trade_allowed = True
 
-    # ================= 交易操作 =================
     def set_leverage(self):
         try:
             data = {
                 "instId": self.symbol,
                 "lever": str(self.leverage),
                 "mgnMode": "cross",
-                "posSide": "long"
+                "posSide": "long",
             }
             result = self.client.request("POST", "/api/v5/account/set-leverage", data=data)
             if result:
@@ -337,7 +421,7 @@ class OKXSimFuturesTrader:
                 else:
                     self.position = 0
                     self.entry_price = None
-                    self.logger.info("✅ 当前无持仓")
+                    self.logger.info("✅ 当前持仓 | 本地记录: 无持仓")
             else:
                 status = "多头持仓" if self.position == 1 else "无持仓"
                 self.logger.info(f"✅ 当前持仓 | 本地记录: {status}")
@@ -361,7 +445,8 @@ class OKXSimFuturesTrader:
             result = self.client.request("POST", "/api/v5/trade/order", data=data)
             if result and len(result) > 0:
                 self.position = 1
-                self.entry_price = self.last_price
+                # 核心修改：从订单结果中提取真实成交价格（而非last_price）
+                self.entry_price = float(result[0].get('avgPx', self.last_price))
                 self.logger.info(
                     f"🟢 开多成功 | 订单ID:{result[0]['ordId']} | 价格:{self.entry_price:.2f} | 张数:{order_size}")
 
@@ -410,7 +495,7 @@ class OKXSimFuturesTrader:
             }
             result = self.client.request("POST", "/api/v5/trade/order", data=data)
             if result and len(result) > 0:
-                sell_price = self.last_price
+                sell_price = float(result[0].get('avgPx', self.last_price))
                 profit = (sell_price - self.entry_price) * order_size if self.entry_price else 0
                 self.position = 0
                 self.entry_price = None
@@ -453,7 +538,6 @@ class OKXSimFuturesTrader:
         else:
             self.logger.info("✅ 所有持仓已清空")
 
-    # ================= 主循环 =================
     def run_strategy(self):
         self.logger.info(f"{'=' * 60}")
         self.logger.info(f"📈 OKX合约模拟盘策略启动 | {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -490,8 +574,12 @@ class OKXSimFuturesTrader:
                     trade_executed = False
                     if self.trade_allowed:
                         if signal == 1 and self.position == 0:
-                            result = self.buy()
-                            trade_executed = result is not None
+                            # ========== 核心修改：开仓前执行SLTP概率检查 ==========
+                            if self.check_pre_open_sltp(df):
+                                result = self.buy()
+                                trade_executed = result is not None
+                            else:
+                                self.logger.info("📉 因SLTP概率不达标，放弃开仓")
 
                     # 止盈止损检查
                     if self.position == 1 and not df.empty:
@@ -518,3 +606,21 @@ class OKXSimFuturesTrader:
             self.logger.info(f"\n📊 策略运行结束 | 总交易次数: {total_trades}")
             self.logger.info(f"🕒 结束时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             self.logger.info(f"{'=' * 60}")
+
+
+# ================= 策略启动入口 =================
+if __name__ == "__main__":
+    try:
+        # 加载配置文件
+        config = load_config("config.yaml")  # 按实际配置文件路径调整
+        # 初始化策略
+        trader = OKXSimFuturesTrader(config)
+        # 启动策略
+        trader.run_strategy()
+    except Exception as e:
+        print(f"❌ 策略启动失败: {str(e)}")
+        # 强制平仓（如果有持仓）
+        try:
+            trader.force_close_position()
+        except:
+            pass

@@ -15,7 +15,7 @@
         "position_ratio": 0.1,
         "lr_weight": 0.6,
         "rf_weight": 0.4,
-        "vote_threshold": 0.5,
+        "vote_threshold": 0.4,
         "tp_prob_threshold": 0.7,
         "sl_prob_threshold": 0.7,
         "cycle_interval": 300
