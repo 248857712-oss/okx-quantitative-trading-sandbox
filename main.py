@@ -144,9 +144,12 @@ class OKXSimFuturesTrader:
         self.tp_prob_threshold = config["strategy"]["tp_prob_threshold"]
         self.sl_prob_threshold = config["strategy"]["sl_prob_threshold"]
         self.cycle_interval = config["strategy"]["cycle_interval"]
-        # 新增：最小盈亏阈值（避免微小波动触发）
-        self.min_profit_threshold = 0.001  # 0.1%最小盈利才触发止盈
-        self.min_loss_threshold = 0.001  # 0.1%最小亏损才触发止损
+
+        # 盈亏阈值参数
+        self.min_profit_threshold = 0.001  # 最小盈利比例触发止盈
+        self.min_loss_threshold = 0.001  # 最小亏损比例触发止损
+        self.target_profit_ratio = 0.005  # 开仓预期目标收益（0.5%）
+        self.min_profit_risk_ratio = 1.5  # 最小收益风险比（收益≥1.5倍风险）
 
         # 持仓状态
         self.position = 0
@@ -189,7 +192,7 @@ class OKXSimFuturesTrader:
         self.logger.info(
             f"✅ 止盈止损阈值: 止盈概率≥{self.tp_prob_threshold * 100}% | 止损概率≥{self.sl_prob_threshold * 100}%")
         self.logger.info(
-            f"✅ 最小盈亏阈值: 盈利≥{self.min_profit_threshold * 100}% | 亏损≥{self.min_loss_threshold * 100}%")
+            f"✅ 收益风控阈值: 目标收益≥{self.target_profit_ratio * 100}% | 收益风险比≥{self.min_profit_risk_ratio}")
         self.logger.warning("⚠️  按下Ctrl+C将自动平仓并退出程序")
 
     # ================= 辅助函数：计算下单张数 =================
@@ -292,10 +295,30 @@ class OKXSimFuturesTrader:
             self.logger.error(f"❌ 信号计算失败: {str(e)[:100]}")
             return 0
 
-    # ========== 新增：开仓前止盈止损概率检查 ==========
+    # ========== 新增：计算潜在收益风险比 ==========
+    def calculate_profit_risk_ratio(self, df):
+        """
+        基于近期K线波动计算潜在收益和风险，返回收益风险比
+        :param df: K线数据
+        :return: profit_risk_ratio, potential_profit
+        """
+        if df.empty or len(df) < 10:
+            return 0, 0
+        # 近期波动幅度（取最近10根K线的平均高低价差）
+        recent_df = df.iloc[-10:]
+        avg_range = (recent_df['high'] - recent_df['low']).mean() / recent_df['close'].mean()
+        # 潜在收益：预期上涨幅度（目标收益）
+        potential_profit = self.target_profit_ratio
+        # 潜在风险：近期平均波动幅度的一半（保守估计）
+        potential_risk = avg_range / 2
+        # 计算收益风险比（避免除以0）
+        profit_risk_ratio = potential_profit / potential_risk if potential_risk > 0 else 0
+        return profit_risk_ratio, potential_profit
+
+    # ========== 优化：开仓前结合概率+收益判断 ==========
     def check_pre_open_sltp(self, df):
         """
-        开仓前检查止盈止损概率是否低于阈值
+        开仓前检查：止盈止损概率低于阈值 + 收益风险比达标
         :param df: K线数据
         :return: bool: True=允许开仓，False=禁止开仓
         """
@@ -303,27 +326,41 @@ class OKXSimFuturesTrader:
             self.logger.warning("⚠️  模型未训练或K线数据为空，跳过开仓前SLTP检查")
             return True  # 兜底：无数据时允许开仓
 
-        # 模拟开仓价为当前最新价（开仓前无真实开仓价）
+        # 1. 概率检查
         pre_entry_price = self.last_price if self.last_price else df['close'].iloc[-1]
         tp_prob, sl_prob = self.sltp_model.predict(df, entry_price=pre_entry_price, debug=True)
+        prob_check = tp_prob < self.tp_prob_threshold and sl_prob < self.sl_prob_threshold
 
+        # 2. 收益风险比检查
+        profit_risk_ratio, potential_profit = self.calculate_profit_risk_ratio(df)
+        profit_check = (profit_risk_ratio >= self.min_profit_risk_ratio) and (
+                    potential_profit >= self.target_profit_ratio)
+
+        # 日志输出
         self.logger.info(
-            f"📊 开仓前SLTP检查 | 止盈概率:{tp_prob:.2%} | 止损概率:{sl_prob:.2%} | 阈值:{self.tp_prob_threshold * 100}%/{self.sl_prob_threshold * 100}%")
+            f"📊 开仓前综合检查 | 止盈概率:{tp_prob:.2%} | 止损概率:{sl_prob:.2%} | "
+            f"收益风险比:{profit_risk_ratio:.2f} | 目标收益:{potential_profit * 100}%"
+        )
 
-        # 核心条件：止盈概率 < 止盈阈值 且 止损概率 < 止损阈值
-        if tp_prob < self.tp_prob_threshold and sl_prob < self.sl_prob_threshold:
-            self.logger.info("✅ 开仓前SLTP检查通过：概率低于阈值")
+        # 双条件满足才允许开仓
+        if prob_check and profit_check:
+            self.logger.info("✅ 开仓前检查通过：概率+收益双达标")
             return True
         else:
-            self.logger.warning(f"❌ 开仓前SLTP检查失败：概率达到或超过阈值，禁止开仓")
+            fail_reason = []
+            if not prob_check:
+                fail_reason.append("概率超标")
+            if not profit_check:
+                fail_reason.append("收益风险比不达标")
+            self.logger.warning(f"❌ 开仓前检查失败：{' + '.join(fail_reason)}")
             return False
 
-    # ========== 核心修复：止盈止损结合实际盈亏状态 ==========
+    # ========== 优化：止盈止损结合实际收益判断 ==========
     def check_stop_loss_take_profit(self, df):
         """
-        止盈止损检查：结合实际盈亏状态 + 概率阈值
-        - 止盈：盈利 ≥ 最小盈利阈值 且 止盈概率 ≥ 阈值
-        - 止损：亏损 ≥ 最小亏损阈值 且 止损概率 ≥ 阈值
+        止盈止损检查：
+        - 止盈：盈利≥最小盈利 + 盈利≥目标收益 + 止盈概率达标
+        - 止损：亏损≥最小亏损 + 止损概率达标
         """
         if self.position != 1:
             return
@@ -331,9 +368,9 @@ class OKXSimFuturesTrader:
             self.logger.warning("⚠️  无开仓价/最新价，止盈止损预测跳过")
             return
 
-        # 1. 计算实际盈亏比例
+        # 1. 计算实际盈亏
         profit_ratio = (self.last_price - self.entry_price) / self.entry_price
-        profit_abs = self.last_price - self.entry_price  # 绝对盈亏
+        profit_abs = self.last_price - self.entry_price
         profit_status = "盈利" if profit_ratio > 0 else "亏损" if profit_ratio < 0 else "持平"
 
         # 2. 预测止盈止损概率
@@ -343,32 +380,38 @@ class OKXSimFuturesTrader:
             f"止盈概率:{tp_prob:.2%} | 止损概率:{sl_prob:.2%}"
         )
 
-        # 3. 止盈触发：仅当盈利且达到最小盈利阈值 + 止盈概率达标
-        if profit_ratio >= self.min_profit_threshold and tp_prob >= self.tp_prob_threshold:
+        # 3. 止盈触发条件（三条件同时满足）
+        tp_conditions = [
+            profit_ratio >= self.min_profit_threshold,  # 最小盈利
+            profit_ratio >= self.target_profit_ratio,  # 目标收益
+            tp_prob >= self.tp_prob_threshold  # 止盈概率
+        ]
+        # 4. 止损触发条件（双条件同时满足）
+        sl_conditions = [
+            profit_ratio <= -self.min_loss_threshold,  # 最小亏损
+            sl_prob >= self.sl_prob_threshold  # 止损概率
+        ]
+        if all(tp_conditions):
             self.logger.info(
-                f"🚀 触发止盈 | 盈利{profit_ratio:.2%} ≥ {self.min_profit_threshold * 100}% + "
+                f"🚀 触发止盈 | 盈利{profit_ratio:.2%} ≥ 目标{self.target_profit_ratio * 100}% + "
                 f"止盈概率{tp_prob:.2%} ≥ {self.tp_prob_threshold * 100}%"
             )
             self.sell(is_force=True)
-
-        # 4. 止损触发：仅当亏损且达到最小亏损阈值 + 止损概率达标
-        elif profit_ratio <= -self.min_loss_threshold and sl_prob >= self.sl_prob_threshold:
+        elif all(sl_conditions):
             self.logger.info(
                 f"🛑 触发止损 | 亏损{abs(profit_ratio):.2%} ≥ {self.min_loss_threshold * 100}% + "
                 f"止损概率{sl_prob:.2%} ≥ {self.sl_prob_threshold * 100}%"
             )
             self.sell(is_force=True)
-
-        # 5. 无触发情况
+        # 5. 未触发原因
         else:
             reasons = []
-            if profit_ratio < self.min_profit_threshold and tp_prob >= self.tp_prob_threshold:
-                reasons.append(f"盈利不足({profit_ratio:.2%} < {self.min_profit_threshold * 100}%)")
-            if profit_ratio > -self.min_loss_threshold and sl_prob >= self.sl_prob_threshold:
-                reasons.append(f"亏损不足({abs(profit_ratio):.2%} < {self.min_loss_threshold * 100}%)")
+            if tp_prob >= self.tp_prob_threshold and not all(tp_conditions[:2]):
+                reasons.append(f"盈利未达目标({profit_ratio:.2%} < {self.target_profit_ratio * 100}%)")
+            if sl_prob >= self.sl_prob_threshold and not sl_conditions[0]:
+                reasons.append(f"亏损未达阈值({abs(profit_ratio):.2%} < {self.min_loss_threshold * 100}%)")
             if tp_prob < self.tp_prob_threshold and sl_prob < self.sl_prob_threshold:
                 reasons.append("概率未达标")
-
             if reasons:
                 self.logger.info(f"ℹ️  未触发止盈止损 | 原因: {'; '.join(reasons)}")
 
@@ -574,12 +617,12 @@ class OKXSimFuturesTrader:
                     trade_executed = False
                     if self.trade_allowed:
                         if signal == 1 and self.position == 0:
-                            # ========== 核心修改：开仓前执行SLTP概率检查 ==========
+                            # ========== 核心修改：开仓前执行综合检查 ==========
                             if self.check_pre_open_sltp(df):
                                 result = self.buy()
                                 trade_executed = result is not None
                             else:
-                                self.logger.info("📉 因SLTP概率不达标，放弃开仓")
+                                self.logger.info("📉 因综合检查不达标，放弃开仓")
 
                     # 止盈止损检查
                     if self.position == 1 and not df.empty:
