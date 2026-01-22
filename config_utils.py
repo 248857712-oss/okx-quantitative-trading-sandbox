@@ -2,25 +2,27 @@ import json
 import os
 from typing import Dict, Any
 
-# 现货策略默认配置（缺失时自动填充）
+# 合约策略默认配置（更新为合约默认配置）
 DEFAULT_CONFIG = {
     "okx": {
         "api_key": "",
         "api_secret": "",
         "api_passphrase": "",
-        "symbol": "BTC-USDT",
+        "symbol": "BTC-USDT-SWAP",
         "is_sim": True,  # 默认模拟盘
-        "inst_type": "SPOT"  # 强制现货
+        "inst_type": "SWAP"  # 合约类型
     },
     "strategy": {
         "leverage": 10,
         "position_ratio": 0.1,  # 10%仓位
-        "vote_threshold": 0.7,
+        "lr_weight": 0.6,
+        "rf_weight": 0.4,
+        "vote_threshold": 0.4,
         "tp_prob_threshold": 0.7,
-        "sl_prob_threshold": 0.7,
+        "sl_prob_threshold": 0.5,
         "cycle_interval": 60,  # 轮询间隔
         "boll_window": 20,  # 布林带窗口
-        "boll_dev": 1  # 布林带标准差
+        "boll_dev": 2  # 布林带标准差
     },
     "log": {
         "log_path": "./logs",

@@ -4,8 +4,8 @@
     "api_secret": "DFB6E3A73B1D6A6939EA8A25B0AE7AE7",
     "api_passphrase": "!Lxz20071125",
     "is_sim": true,
-    "symbol": "BTC-USDT",
-    "inst_type": "SPOT"
+    "symbol": "BTC-USDT-SWAP",
+    "inst_type": "SWAP"
   },
   "proxy": {
     "http": "http://127.0.0.1:10808",
@@ -18,10 +18,10 @@
     "rf_weight": 0.4,
     "vote_threshold": 0.4,
     "tp_prob_threshold": 0.7,
-    "sl_prob_threshold": 0.7,
+    "sl_prob_threshold": 0.5,
     "cycle_interval": 60,
     "boll_window": 20,
-    "boll_dev": 1
+    "boll_dev": 2
   },
   "log": {
     "log_path": "./logs",

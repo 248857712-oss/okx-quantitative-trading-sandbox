@@ -1,4 +1,4 @@
-from main import  OKXSpotMarginTrader
+from main import  OKXFuturesTrader
 from config_utils import load_config
 
 if __name__ == '__main__':
@@ -6,7 +6,7 @@ if __name__ == '__main__':
         # 加载配置
         config = load_config()
         # 初始化策略
-        trader = OKXSpotMarginTrader(config)
+        trader = OKXFuturesTrader(config)
         # 运行策略
         trader.run_strategy()
     except Exception as e:

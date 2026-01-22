@@ -8,17 +8,17 @@ from datetime import datetime
 
 # 页面配置
 st.set_page_config(
-    page_title="OKX量化策略监控面板",
+    page_title="OKX合约量化策略监控面板",
     page_icon="📈",
     layout="wide"
 )
 
-st.title("📈 OKX 现货杠杆量化策略实时监控面板")
+st.title("📈 OKX 合约模拟盘量化策略实时监控面板")
 
 
 # ================= 修复1：实现兼容的交易记录读取函数 =================
 def load_trade_records(record_path: str = "./trade_records.json") -> pd.DataFrame:
-    """读取JSON格式的交易记录（适配我们的策略）"""
+    """读取JSON格式的交易记录（适配合约策略）"""
     # 初始化空DataFrame
     df = pd.DataFrame(columns=["time", "type", "price", "size", "profit", "order_id"])
 
@@ -32,8 +32,12 @@ def load_trade_records(record_path: str = "./trade_records.json") -> pd.DataFram
         # 转换为DataFrame并处理格式
         df = pd.DataFrame(records)
         if not df.empty:
-            # 统一字段格式（适配策略中的"现货买入"/"现货卖出"）
-            df["type"] = df["type"].replace({"现货买入": "开多", "现货卖出": "平仓"})
+            # 统一字段格式（适配合约策略的开多/平仓）
+            df["type"] = df["type"].replace({
+                "【模拟】合约开多": "开多",
+                "【模拟】合约平多": "平仓",
+                "【模拟】合约平空": "平仓"
+            })
             # 转换时间格式
             df["time"] = pd.to_datetime(df["time"], format="%Y-%m-%d %H:%M:%S")
             # 数值类型转换
@@ -64,11 +68,11 @@ with col1:
                 "time": st.column_config.DatetimeColumn("时间", format="YYYY-MM-DD HH:mm:ss"),
                 "type": st.column_config.SelectboxColumn(
                     "交易类型",
-                    options=["开多", "平仓"],  # 适配策略的现货买入/卖出
+                    options=["开多", "平仓"],  # 适配合约策略
                     default="开多"
                 ),
                 "price": st.column_config.NumberColumn("价格 (USDT)", format="%.2f"),
-                "size": st.column_config.NumberColumn("持仓数量", format="%.6f"),  # 修复：现货是数量而非张数
+                "size": st.column_config.NumberColumn("持仓数量 (BTC)", format="%.3f"),  # 合约精度3位
                 "profit": st.column_config.NumberColumn("盈亏 (USDT)", format="%.2f"),
                 "order_id": "订单ID"
             },
@@ -140,7 +144,7 @@ else:
 st.subheader("📜 最新运行日志")
 log_dir = "./logs"
 if os.path.exists(log_dir):
-    # 修复：匹配策略的日志文件名（okx_spot_strategy_开头）
+    # 匹配合约策略的日志文件名
     log_files = [f for f in os.listdir(log_dir) if f.startswith("okx_spot_strategy_") and f.endswith(".log")]
     if log_files:
         latest_log_file = max(log_files, key=lambda x: os.path.getmtime(os.path.join(log_dir, x)))
