@@ -1,0 +1,33 @@
+{
+    "okx": {
+        "api_key": "2661e031-b477-4f5d-8e2f-eb6f37b4c843",
+        "api_secret": "DFB6E3A73B1D6A6939EA8A25B0AE7AE7",
+        "api_passphrase": "!Lxz20071125",
+        "is_sim": true,
+        "symbol": "BTC-USDT-SWAP",
+        "inst_type": "SWAP"
+    },
+    "proxy": {
+        "http": "http://127.0.0.1:10808",
+        "https": "http://127.0.0.1:10808"
+    },
+    "strategy": {
+        "leverage": 10,
+        "position_ratio": 0.1,
+        "lr_weight": 0.4,
+        "rf_weight": 0.6,
+        "vote_threshold": 0.50,
+        "tp_prob_threshold": 0.2,
+        "sl_prob_threshold": 0.3,
+        "cycle_interval": 60,
+        "boll_window": 60,
+        "boll_dev": 2,
+        "min_profit_threshold": 0.004,
+        "target_profit_ratio": 0.02,
+        "min_loss_threshold": 0.01
+    },
+    "log": {
+        "log_path": "./logs",
+        "log_level": "INFO"
+    }
+}

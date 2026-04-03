@@ -22,7 +22,6 @@ from gb_stop_loss_take_profit import GBSLTPModel
 config = load_config()
 PROXY_SETTINGS = config["proxy"]
 
-# 从usdt_get.py整合的核心函数（保留）
 def create_proxy_session():
     session = requests.Session()
     session.proxies = {
@@ -448,7 +447,7 @@ class OKXFuturesTrader:
             sl_prob >= self.sl_prob_threshold
         ]
 
-        self.logger.info(f"📊 盈亏状态 | {profit_status} {profit_ratio:.2%} | 盈亏金额: {profit_abs:.2f}/100 USDT")
+        self.logger.info(f"📊 盈亏状态 | {profit_status} {profit_ratio:.2%} | 盈亏金额: {profit_abs:.2f/100} USDT")
         if all(tp_conditions):
             self.logger.info(f"🚀 触发止盈 | 盈利{profit_ratio:.2%} ≥ 目标{self.target_profit_ratio * 100}%")
             self.close_position(is_force=True)
@@ -458,7 +457,7 @@ class OKXFuturesTrader:
 
     def boll_filter(self):
         try:
-            df = self.fetch_ohlcv('1d', 50)
+            df = self.fetch_ohlcv('1d', 100)
             if df.empty:
                 self.trade_allowed = True
                 return
