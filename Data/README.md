@@ -3,8 +3,8 @@
 
 ```
 okx_quant/
-├── config/          # 配置
-│   ├── config.json
+├── config/          配置目录
+│   │
 │   └── config_utils.py
 ├── utils/           # 工具
 │   ├── trade_utils.py 
